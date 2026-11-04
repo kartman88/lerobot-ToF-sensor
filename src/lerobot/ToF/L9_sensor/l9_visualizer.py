@@ -74,8 +74,13 @@ COLORBAR_MARGIN_PX = 20  # colorbar backgrounds include the tick labels and the 
 # --- host transform --------------------------------------------------------------------------------------------------
 
 def build_library():
-    """Build the host transform library if it is missing or older than its sources."""
-    sources = [WRAPPER_SOURCE, *sorted((TRANSFORM_DIR / "src").rglob("*.c"))]
+    """Build the host transform library if it is missing or older than its sources.
+
+    Without the ST sources (e.g. in the lerobot repo, which only has the prebuilt library) an existing library is
+    used as is: a git checkout gives the files arbitrary modification times."""
+    if LIBRARY_PATH.exists() and not TRANSFORM_DIR.is_dir():
+        return
+    sources =[WRAPPER_SOURCE, *sorted((TRANSFORM_DIR / "src").rglob("*.c"))]
     includes = [TRANSFORM_DIR / "include/public", TRANSFORM_DIR / "include/private",
                 MEDIA_DIR / "media-c/header-lib/include/public", MEDIA_DIR / "transform-c/header-lib/include/public"]
     dependencies = sources + [h for d in includes for h in d.rglob("*.h")]

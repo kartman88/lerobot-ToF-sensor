@@ -176,3 +176,8 @@ outputs/
 *.urdf
 *.xml
 *.part
+
+# Prebuilt VL53L9 transform library (the ST sources needed to rebuild it are not in this repo)
+!src/lerobot/ToF/L9_sensor/build/
+src/lerobot/ToF/L9_sensor/build/*
+!src/lerobot/ToF/L9_sensor/build/libl9transform.so
