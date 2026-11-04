@@ -121,6 +121,7 @@ from lerobot.teleoperators import (  # noqa: F401
     so_leader,
     unitree_g1,
 )
+from lerobot.ToF.l9_display import make_tof_display_config
 from lerobot.utils.cycle_timer import CycleTimer
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.utils import init_logging, move_cursor_up
@@ -150,6 +151,15 @@ class TeleoperateConfig:
     display_port: int | None = None
     # Whether to display compressed (JPEG) images instead of raw frames
     display_compressed_images: bool = False
+    # Display-only VL53L9 ToF sensor: its filtered depth is shown next to the cameras, never recorded nor given
+    # to the policy. Serial port of the board (e.g. /dev/ttyACM1), None disables it. See lerobot/ToF/l9_display.py.
+    display_tof_port: str | None = None
+    # Must match CONF_RAW_BAUDRATE of the L9 firmware.
+    display_tof_baud: int = 12_500_000
+    # Calibration capture used until the board sends its own one at boot.
+    display_tof_calib: str | None = None
+    display_tof_flip_x: bool = False
+    display_tof_flip_y: bool = False
 
 
 def teleop_loop(
@@ -255,7 +265,11 @@ def teleoperate(cfg: TeleoperateConfig):
     logging.info(pformat(asdict(cfg)))
     if cfg.display_data:
         init_visualization(
-            cfg.display_mode, session_name="teleoperation", ip=cfg.display_ip, port=cfg.display_port
+            cfg.display_mode,
+            session_name="teleoperation",
+            ip=cfg.display_ip,
+            port=cfg.display_port,
+            tof=make_tof_display_config(cfg),
         )
     display_compressed_images = (
         True
