@@ -1,0 +1,4 @@
+[submodule "src/lerobot/tactile_sensor/FlexiTac"]
+	path = src/lerobot/tactile_sensor/FlexiTac
+	url = https://github.com/FlexiTac/FlexiTac
+	ignore = untracked

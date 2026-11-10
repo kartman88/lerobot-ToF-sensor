@@ -44,6 +44,9 @@ NO_DEPTH_TIMEOUT_S = 1.0  # without depth for this long the "NO DEPTH" image rep
 SENSOR_SHAPE = (42, 54)  # (height, width) of the full resolution frames, used for the "NO DEPTH" image
 PLACEHOLDER_SCALE = 4  # the "NO DEPTH" image is larger than the sensor so that the text is readable
 PLACEHOLDER_VALUE_MM = 1000  # depth value of the text pixels, the background is 0 (no data)
+FALLBACK_BAUD = (
+    115_200  # standard baudrate set before the custom one when tcsetattr rejects it (_patch_high_baudrates)
+)
 
 
 @dataclass
@@ -55,8 +58,45 @@ class L9DisplayConfig:
     # calibration from a capture of l9_raw_receiver.py --out (or a raw dump), used until the board sends its own
     # one at boot (reset the board after the start to get it)
     calib: str | None = None
+    # controls of the transform pipeline (bypass of the algorithms and of the validity filters), None:
+    # L9_sensor/l9_transform_config.yaml. Read when the pipeline is created: restart lerobot after a change.
+    config: str | None = None
     flip_x: bool = False
     flip_y: bool = False
+
+
+def _patch_high_baudrates(serial_module) -> None:
+    """Let ``serial_module.Serial`` open the port at baudrates above 4 Mbaud with Pythons built for the old glibc API.
+
+    Since glibc 2.42 the termios speeds are plain numbers; a Python built against older headers (e.g. the prebuilt
+    3.12 installed by uv / mise) still passes the old ``B*`` codes, and pyserial's ``tcsetattr`` is then rejected
+    with EINVAL for the non-standard baudrates (12.5 Mbaud of the ST-LINK VCP). On that error the port is configured
+    at FALLBACK_BAUD first, then set to the requested baudrate with the Linux ``TCSETS2`` ioctl (``BOTHER``), which
+    does not depend on the glibc speed API. Called in the reader process only: the lerobot process is not changed.
+    """
+    import errno
+    import termios
+
+    base = serial_module.Serial
+    if not hasattr(base, "_set_special_baudrate"):  # not Linux
+        return
+
+    class Termios2Serial(base):
+        def _reconfigure_port(self, force_update=False):
+            try:
+                super()._reconfigure_port(force_update)
+            except termios.error as e:
+                requested = self._baudrate
+                if e.args[0] != errno.EINVAL or hasattr(termios, f"B{requested}"):
+                    raise  # not the custom baudrate issue
+                self._baudrate = FALLBACK_BAUD
+                try:
+                    super()._reconfigure_port(force_update)
+                finally:
+                    self._baudrate = requested
+                self._set_special_baudrate(requested)
+
+    serial_module.Serial = Termios2Serial
 
 
 def _reader_main(config: L9DisplayConfig, results, stop_event) -> None:
@@ -75,6 +115,7 @@ def _reader_main(config: L9DisplayConfig, results, stop_event) -> None:
             (None, {"error": f"cannot import l9_visualizer ({e}), install numpy, pyserial and matplotlib"})
         )
         return
+    _patch_high_baudrates(viz.serial)
 
     no_transform = False
     if not viz.LIBRARY_PATH.exists():
@@ -89,14 +130,23 @@ def _reader_main(config: L9DisplayConfig, results, stop_event) -> None:
             calib = viz.load_calib(config.calib)
         except (OSError, ValueError) as e:
             results.put((None, {"error": f"calib: {e}"}))
+    config_path = config.config or str(viz.CONFIG_PATH)
+    try:
+        controls = viz.load_config(config_path)
+        changed = [f"{name}={value}" for name, value in controls.items() if value]
+        results.put((None, {"controls": f"{config_path}: {', '.join(changed) or 'library defaults'}"}))
+    except Exception as e:  # noqa: BLE001 - missing or invalid yaml: library defaults, never die
+        controls = {}
+        results.put((None, {"error": f"config {config_path}: {e}, using the library defaults"}))
     args = argparse.Namespace(
+        controls=controls,
         port=config.port,
         baud=config.baud,
         file=None,
         replay=None,
         no_transform=no_transform,
         record_path=None,
-        clock="realtime",
+        clock="monotonic",  # acq_time_ns comparable with time.monotonic() of the lerobot process (sample age)
         trigger_latency_us=0.0,
     )
     # Reader.run() returns on a serial error (port missing, board unplugged) after publishing it: retry until stopped
@@ -144,6 +194,10 @@ class L9DepthStream:
         self._last_depth_time = -float("inf")
         self._last_shape = SENSOR_SHAPE
         self._showing_no_depth = False
+        # last depth for the dataset (lerobot.utils.sensor_hub): (H, W) uint16 mm, 0 = invalid, NOT flipped (sensor
+        # orientation, the flips are for the display only), and its time on the time.monotonic() clock
+        self.last_sample: np.ndarray | None = None
+        self.last_sample_time: float | None = None
 
     def start(self) -> None:
         """Start the reader process (serial reception and transform pipeline)."""
@@ -203,6 +257,11 @@ class L9DepthStream:
         depth = transformed["depth"]
         valid = (transformed["status"] == 0) & np.isfinite(depth) & (depth > 0)
         depth_mm = np.where(valid, np.clip(np.rint(depth), 1, np.iinfo(np.uint16).max), 0).astype(np.uint16)
+        self.last_sample = depth_mm
+        # centre of the exposure once the board clock is synced, else the time the frame is read here (later by up
+        # to one control loop period)
+        acq_time_ns = frame.get("acq_time_ns")
+        self.last_sample_time = acq_time_ns / 1e9 if acq_time_ns is not None else time.monotonic()
         if self.config.flip_x:
             depth_mm = depth_mm[:, ::-1]
         if self.config.flip_y:
@@ -215,6 +274,7 @@ class L9DepthStream:
             ("error", logging.ERROR),
             ("transform_error", logging.ERROR),
             ("calib_source", logging.INFO),
+            ("controls", logging.INFO),
         ):
             value = info.get(key)
             if value and value != self._reported.get(key):
@@ -230,6 +290,41 @@ def make_tof_display_config(cfg) -> L9DisplayConfig | None:
         port=cfg.display_tof_port,
         baud=cfg.display_tof_baud,
         calib=cfg.display_tof_calib,
+        config=getattr(cfg, "display_tof_config", None),
         flip_x=cfg.display_tof_flip_x,
         flip_y=cfg.display_tof_flip_y,
+    )
+
+
+if __name__ == "__main__":
+    # Standalone test of the L9 ToF in the lerobot viewer, without robot nor cameras:
+    #   uv run python -m lerobot.ToF.l9_display --display_tof_port=/dev/ttyACM0
+    # The package imports are used (not the classes of __main__) to run exactly the lerobot code path.
+    from lerobot.ToF.l9_display import make_tof_display_config as _make_config
+    from lerobot.utils.utils import init_logging
+    from lerobot.utils.visualization_utils import VISUALIZATION_MODES, display_sensors_only
+
+    parser = argparse.ArgumentParser(
+        description="Show only the L9 ToF depth in the lerobot viewer (Ctrl+C to stop)."
+    )
+    parser.add_argument(
+        "--display_tof_port", required=True, help="serial port of the L9 board, e.g. /dev/ttyACM0"
+    )
+    parser.add_argument("--display_tof_baud", type=int, default=12_500_000)
+    parser.add_argument("--display_tof_calib", default=None)
+    parser.add_argument(
+        "--display_tof_config",
+        default=None,
+        help="pipeline controls yaml (default: L9_sensor/l9_transform_config.yaml)",
+    )
+    parser.add_argument("--display_tof_flip_x", action="store_true")
+    parser.add_argument("--display_tof_flip_y", action="store_true")
+    parser.add_argument("--display_mode", default="rerun", choices=VISUALIZATION_MODES)
+    parser.add_argument("--display_ip", default=None, help="remote Rerun server / Foxglove bind address")
+    parser.add_argument("--display_port", type=int, default=None)
+    parser.add_argument("--fps", type=float, default=30.0, help="rate of the viewer updates")
+    cli = parser.parse_args()
+    init_logging()
+    display_sensors_only(
+        cli.display_mode, ip=cli.display_ip, port=cli.display_port, tof=_make_config(cli), fps=cli.fps
     )

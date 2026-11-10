@@ -1,0 +1,44 @@
+# Processing of the FlexiTac heatmap shown in the lerobot viewer (lerobot/tactile_sensor/flexitac_display.py).
+# Read at start: restart lerobot after a change. Another file can be given with --display_tactile_config=my.yaml
+# Every setting is optional: a missing one keeps the default written here (= the original FlexiTac fast_32_16.py).
+#
+# Pipeline, for each frame of 16 x 32 taxels (raw values 0-255, 8 bits sent by 32_16_fast.ino):
+#   contact = clip(raw - baseline - threshold, 0, contact_clip) -> normalization to [0, 1] -> temporal filter
+#   -> colormap. The baseline is taken at each (re)connection: do not touch the sensor during the first frames.
+
+# Number of frames at start (sensor at rest) whose per-taxel median is the baseline subtracted from every frame.
+# More frames = more robust baseline, longer wait (the board sends a few hundred frames per second).
+baseline_frames: 30
+
+# Offset subtracted after the baseline, in raw units (0-255) (default: 15): taxels whose signal is below it are shown as 0.
+# It hides the noise of the sensor at rest, but also the light contacts (e.g. the edges of a pen line). Set it just
+# above the "baseline noise" printed in the log after the baseline (e.g. 5-8 instead of 15 for a quiet sensor).
+threshold: 2
+
+# Maximum contact signal kept (raw units, after baseline and threshold): stronger presses are clipped to it.
+contact_clip: 100
+
+# How the contact is scaled to [0, 1] before the colormap:
+#   per_frame_max(default): divided by the strongest taxel of the frame, so that it is always full colour. Small contacts are
+#                  well visible, but the weaker taxels of a contact (e.g. most of a pen line) look dark, and the
+#                  same pressure has a different colour depending on the other contacts. (original behaviour)
+#   fixed:         divided by fixed_scale: the same pressure always has the same colour, all the taxels of a
+#                  contact keep their relative intensity (the whole pen line is visible).
+normalization: fixed
+
+# fixed normalization only (default: 100): contact value (raw units) shown as full colour. Lower = more sensitive display.
+fixed_scale: 25
+
+# per_frame_max normalization only: divisor used when no taxel goes above the threshold (no contact), so that the
+# residual noise is shown dark instead of being stretched to full colour.
+noise_scale: 60
+
+# Temporal filter, applied per received frame (default: 0.2): shown = alpha * new + (1 - alpha) * previous shown.
+# Lower = smoother but slower (a moving contact leaves a fading trail), 1.0 = no filter (raw response, more noise).
+temporal_alpha: 0.6
+
+# Colormap of the heatmap (OpenCV name) (default: viridis): viridis, inferno, magma, plasma, jet, turbo, hot, gray, ...
+colormap: inferno
+
+# Size of each taxel in the displayed image, in pixels (nearest neighbour, no blur): 10 -> 320 x 160 image.
+display_scale: 10

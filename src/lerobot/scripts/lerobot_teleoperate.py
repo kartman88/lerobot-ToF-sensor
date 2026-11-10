@@ -101,6 +101,7 @@ from lerobot.robots import (  # noqa: F401
     so_follower,
     unitree_g1 as unitree_g1_robot,
 )
+from lerobot.tactile_sensor.flexitac_display import make_tactile_display_config
 from lerobot.teleoperators import (  # noqa: F401
     Teleoperator,
     TeleoperatorConfig,
@@ -158,8 +159,22 @@ class TeleoperateConfig:
     display_tof_baud: int = 12_500_000
     # Calibration capture used until the board sends its own one at boot.
     display_tof_calib: str | None = None
+    # Controls of the transform pipeline (bypass of the algorithms and validity filters), None uses
+    # lerobot/ToF/L9_sensor/l9_transform_config.yaml.
+    display_tof_config: str | None = None
     display_tof_flip_x: bool = False
     display_tof_flip_y: bool = False
+    # Display-only FlexiTac tactile sensor: its heatmap is shown next to the cameras, never recorded nor given to
+    # the policy. Serial port of the board (e.g. /dev/ttyUSB0), None disables it. See
+    # lerobot/tactile_sensor/flexitac_display.py.
+    display_tactile_port: str | None = None
+    # Must match BAUD_RATE of FlexiTac/32_16_fast.ino.
+    display_tactile_baud: int = 2_000_000
+    # Processing settings of the heatmap (threshold, normalization, filter, ...), None uses
+    # lerobot/tactile_sensor/flexitac_config.yaml.
+    display_tactile_config: str | None = None
+    display_tactile_flip_x: bool = False
+    display_tactile_flip_y: bool = False
 
 
 def teleop_loop(
@@ -270,6 +285,7 @@ def teleoperate(cfg: TeleoperateConfig):
             ip=cfg.display_ip,
             port=cfg.display_port,
             tof=make_tof_display_config(cfg),
+            tactile=make_tactile_display_config(cfg),
         )
     display_compressed_images = (
         True

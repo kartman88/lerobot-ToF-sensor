@@ -10,6 +10,8 @@ The pipeline is built from the sources of the package (Middlewares/ST/vl53l9-tra
 l9_transform_host.c into build/libl9transform.so on the first run (requires gcc). It uses the calibration
 received in the L9CB packet, sent once at boot: start the viewer before resetting the board, or pass --calib with a
 capture made by l9_raw_receiver.py --out. Without calibration the default one of the library is used.
+The controls of the pipeline (bypass of the algorithms and of the validity filters) are read from
+l9_transform_config.yaml, or from the file given with --config.
 
 Packets are decoded with l9_raw_receiver.py. The reception and the pipeline run in a separate process, so that the
 matplotlib redraws never delay the serial reads (the ST-LINK VCP has no flow control, a late reader loses bytes).
@@ -41,6 +43,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import serial
+import yaml
 from matplotlib.transforms import Bbox
 
 import l9_raw_receiver as rx
@@ -53,6 +56,10 @@ MEDIA_DIR = PACKAGE_ROOT / "Middlewares/ST/media-object"
 WRAPPER_SOURCE = TOOLS_DIR / "l9_transform_host.c"
 LIBRARY_PATH = TOOLS_DIR / "build" / "libl9transform.so"
 RECORDS_DIR = TOOLS_DIR / "Records"
+CONFIG_PATH = TOOLS_DIR / "l9_transform_config.yaml"
+# boolean controls of vl53l9-transform-c (see the README of the library), calib-buffer is set from the L9CB packet
+TRANSFORM_CONTROLS = ["bypass-r2p-algo", "bypass-tnr-algo", "bypass-r2p-filter", "bypass-conf-filter",
+                      "bypass-refl-filter", "bypass-sharpener-filter", "bypass-fp-filter", "cover-glass"]
 
 # media-c return codes (see media-c/error.h)
 MEDIA_ERRORS = {-1: "INVALID_PARAMETER", -2: "INVALID_STATE", -3: "INVALID_CONFIGURATION", -4: "UNALIGNED_MEMORY",
@@ -80,7 +87,7 @@ def build_library():
     used as is: a git checkout gives the files arbitrary modification times."""
     if LIBRARY_PATH.exists() and not TRANSFORM_DIR.is_dir():
         return
-    sources =[WRAPPER_SOURCE, *sorted((TRANSFORM_DIR / "src").rglob("*.c"))]
+    sources = [WRAPPER_SOURCE, *sorted((TRANSFORM_DIR / "src").rglob("*.c"))]
     includes = [TRANSFORM_DIR / "include/public", TRANSFORM_DIR / "include/private",
                 MEDIA_DIR / "media-c/header-lib/include/public", MEDIA_DIR / "transform-c/header-lib/include/public"]
     dependencies = sources + [h for d in includes for h in d.rglob("*.h")]
@@ -96,7 +103,8 @@ def build_library():
 def load_library():
     lib = ctypes.CDLL(str(LIBRARY_PATH))
     float_p = ctypes.POINTER(ctypes.c_float)
-    lib.l9t_create.argtypes = [ctypes.c_char_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)]
+    lib.l9t_create.argtypes = [ctypes.c_char_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_char_p),
+                               ctypes.POINTER(ctypes.c_bool), ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)]
     lib.l9t_create.restype = ctypes.c_int
     lib.l9t_destroy.argtypes = [ctypes.c_void_p]
     lib.l9t_destroy.restype = None
@@ -107,6 +115,21 @@ def load_library():
                                 *[float_p] * len(FLOAT_OUTPUTS), ctypes.POINTER(ctypes.c_uint32)]
     lib.l9t_process.restype = ctypes.c_int
     return lib
+
+
+def load_config(path):
+    """Controls of the pipeline from a yaml file, as a dict name -> bool (only the controls listed in the file)."""
+    with open(path) as f:
+        config = yaml.safe_load(f) or {}
+    controls = config.get("controls") or {}
+    if not isinstance(controls, dict):
+        raise ValueError("'controls' must be a mapping of control names to true/false")
+    for name, value in controls.items():
+        if name not in TRANSFORM_CONTROLS:
+            raise ValueError(f"unknown control '{name}', expected one of {', '.join(TRANSFORM_CONTROLS)}")
+        if not isinstance(value, bool):
+            raise ValueError(f"control '{name}' must be true or false, not {value!r}")
+    return controls
 
 
 def media_error(code):
@@ -120,10 +143,12 @@ class InvalidFrame(Exception):
 class HostTransform:
     """vl53l9-transform-c pipeline running on the PC, frames must be processed in order (temporal filtering)."""
 
-    def __init__(self, calib, raw_size):
+    def __init__(self, calib, raw_size, controls):
         self._lib = load_library()
         self._handle = ctypes.c_void_p()
-        ret = self._lib.l9t_create(calib, raw_size, ctypes.byref(self._handle))
+        names = (ctypes.c_char_p * len(controls))(*[name.encode() for name in controls])
+        values = (ctypes.c_bool * len(controls))(*controls.values())
+        ret = self._lib.l9t_create(calib, raw_size, names, values, len(controls), ctypes.byref(self._handle))
         if ret:
             raise RuntimeError(f"pipeline creation failed: {media_error(ret)}")
         width, height = ctypes.c_uint32(), ctypes.c_uint32()
@@ -379,7 +404,7 @@ class Reader:
                 if self.calib is None:
                     print("[warn] no calibration received (reset the board or use --calib), "
                           "using the default calibration of the library")
-                self.pipeline = HostTransform(self.calib, len(payload))
+                self.pipeline = HostTransform(self.calib, len(payload), self.args.controls)
             self.last_transformed = self.pipeline.process(payload)
         except InvalidFrame:
             # keep showing the previous output
@@ -670,6 +695,8 @@ def main():
                         help="fixed color range of raw distance and depth (automatic by default)")
     parser.add_argument("--show-invalid", action="store_true", help="do not hide depth pixels flagged as invalid")
     parser.add_argument("--no-transform", action="store_true", help="show only the raw data")
+    parser.add_argument("--config", default=str(CONFIG_PATH),
+                        help="yaml file with the controls of the pipeline (default: %(default)s)")
     parser.add_argument("--flip-x", action="store_true", help="mirror the images horizontally")
     parser.add_argument("--flip-y", action="store_true", help="mirror the images vertically")
     parser.add_argument("--refresh", type=float, default=60.0, help="display polling rate in Hz")
@@ -694,6 +721,12 @@ def main():
         print(f"[record] recording to {args.record_path} (written at exit)")
 
     if not args.no_transform and not args.replay:
+        try:
+            args.controls = load_config(args.config)
+        except (OSError, ValueError, yaml.YAMLError) as e:
+            parser.error(f"--config: {e}")
+        changed = [f"{name}={value}" for name, value in args.controls.items() if value]
+        print(f"[config] {args.config}: {', '.join(changed) or 'library defaults'}")
         try:
             build_library()
         except (OSError, subprocess.CalledProcessError) as e:

@@ -1,0 +1,15 @@
+# Controls of the vl53l9-transform-c pipeline run on the PC by l9_visualizer.py (see the README of
+# Middlewares/ST/vl53l9-transform-c). They are applied when the pipeline is created, restart the viewer after a change.
+# Another file can be given with: python3 l9_visualizer.py ... --config my_config.yaml
+#
+# The validity filters run in the final stage (distance_check): a bypassed filter no longer flags pixels as invalid.
+# false = library default (stage enabled).
+controls:
+  bypass-r2p-algo: false          # radial-to-perpendicular conversion of the distance
+  bypass-tnr-algo: false          # temporal noise reduction
+  bypass-r2p-filter: false        # radial-to-perpendicular validity filter
+  bypass-conf-filter: false       # confidence validity filter
+  bypass-refl-filter: false       # reflectance validity filter
+  bypass-sharpener-filter: true  # sharpener validity filter
+  bypass-fp-filter: false         # flying pixel validity filter
+  cover-glass: false              # cover glass compensation (true enables it)

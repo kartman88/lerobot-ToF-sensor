@@ -126,13 +126,17 @@ void l9t_destroy(l9t_t *p_handle) {
  * Create and prepare a pipeline.
  * @param p_calib calibration data received in the L9CB packet (L9T_CALIB_SIZE bytes), NULL for default calibration
  * @param raw_size size of the raw buffers that will be processed (binning 2 or 4)
+ * @param p_control_names names of the boolean controls to set (e.g. "bypass-sharpener-filter")
+ * @param p_control_values values of the controls
+ * @param nb_controls number of controls
  * @param pp_handle created handle
  * @return MEDIA_ERROR_NONE or a MEDIA_ERROR_* code
  */
-int l9t_create(const uint8_t *p_calib, uint32_t raw_size, l9t_t **pp_handle) {
+int l9t_create(const uint8_t *p_calib, uint32_t raw_size, const char *const *p_control_names,
+               const bool *p_control_values, uint32_t nb_controls, l9t_t **pp_handle) {
     int ret;
 
-    if (pp_handle == NULL) {
+    if ((pp_handle == NULL) || ((nb_controls > 0U) && ((p_control_names == NULL) || (p_control_values == NULL)))) {
         return MEDIA_ERROR_INVALID_PARAMETER;
     }
     *pp_handle = NULL;
@@ -184,6 +188,15 @@ int l9t_create(const uint8_t *p_calib, uint32_t raw_size, l9t_t **pp_handle) {
         memcpy(p_handle->calib, p_calib, L9T_CALIB_SIZE);
         ret = transform_set_control(p_handle->p_transform, "calib-buffer",
                                     (value_t){ .val.v_ptr = p_handle->calib, .tid = VTID_POINTER });
+        if (ret != MEDIA_ERROR_NONE) {
+            goto error;
+        }
+    }
+
+    /* NOTE: controls are read by prepare(), they cannot be changed during a stream */
+    for (uint32_t i = 0; i < nb_controls; i++) {
+        ret = transform_set_control(p_handle->p_transform, p_control_names[i],
+                                    (value_t){ .val.v_bool = p_control_values[i], .tid = VTID_BOOL });
         if (ret != MEDIA_ERROR_NONE) {
             goto error;
         }

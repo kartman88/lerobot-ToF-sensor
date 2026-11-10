@@ -132,6 +132,7 @@ from lerobot.robots import (  # noqa: F401
     so_follower,
     unitree_g1 as unitree_g1_robot,
 )
+from lerobot.tactile_sensor.flexitac_display import make_tactile_display_config
 from lerobot.teleoperators import (  # noqa: F401
     Teleoperator,
     TeleoperatorConfig,
@@ -157,6 +158,7 @@ from lerobot.utils.cycle_timer import CycleTimer
 from lerobot.utils.feature_utils import build_dataset_frame, combine_feature_dicts
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.keyboard_input import init_keyboard_listener
+from lerobot.utils.sensor_hub import SensorHub
 from lerobot.utils.utils import (
     init_logging,
     log_say,
@@ -185,15 +187,34 @@ class RecordConfig:
     display_port: int | None = None
     # Whether to display compressed (JPEG) images instead of raw frames
     display_compressed_images: bool = False
-    # Display-only VL53L9 ToF sensor: its filtered depth is shown next to the cameras, never recorded nor given
-    # to the policy. Serial port of the board (e.g. /dev/ttyACM1), None disables it. See lerobot/ToF/l9_display.py.
+    # VL53L9 ToF sensor: its filtered depth is shown next to the cameras (with display_data) and recorded in the
+    # dataset as sensors.tof_* (with record_extra_sensors), never given to the policy. Serial port of the board
+    # (e.g. /dev/ttyACM1), None disables it. See lerobot/ToF/l9_display.py and lerobot/utils/sensor_hub.py.
     display_tof_port: str | None = None
     # Must match CONF_RAW_BAUDRATE of the L9 firmware.
     display_tof_baud: int = 12_500_000
     # Calibration capture used until the board sends its own one at boot.
     display_tof_calib: str | None = None
+    # Controls of the transform pipeline (bypass of the algorithms and validity filters), None uses
+    # lerobot/ToF/L9_sensor/l9_transform_config.yaml.
+    display_tof_config: str | None = None
     display_tof_flip_x: bool = False
     display_tof_flip_y: bool = False
+    # FlexiTac tactile sensor: its heatmap is shown next to the cameras (with display_data) and its raw frames are
+    # recorded in the dataset as sensors.tactile_* (with record_extra_sensors), never given to the policy. Serial
+    # port of the board (e.g. /dev/ttyUSB0), None disables it. See lerobot/tactile_sensor/flexitac_display.py.
+    display_tactile_port: str | None = None
+    # Must match BAUD_RATE of FlexiTac/32_16_fast.ino.
+    display_tactile_baud: int = 2_000_000
+    # Processing settings of the heatmap (threshold, normalization, filter, ...), None uses
+    # lerobot/tactile_sensor/flexitac_config.yaml.
+    display_tactile_config: str | None = None
+    display_tactile_flip_x: bool = False
+    display_tactile_flip_y: bool = False
+    # Save the raw data of the ToF / tactile sensors given above in the dataset, under the sensors.* prefix: the
+    # policies ignore them (only observation.* and image features are policy inputs), they are kept for later work.
+    # False: the sensors are only shown. See lerobot/utils/sensor_hub.py for the recorded features.
+    record_extra_sensors: bool = True
     # Use vocal synthesis to read events.
     play_sounds: bool = True
     # Resume recording on an existing dataset.
@@ -256,6 +277,7 @@ def record_loop(
     display_mode: str = "rerun",
     display_compressed_images: bool = False,
     timer: CycleTimer | None = None,
+    sensors: SensorHub | None = None,
 ) -> None:
     """Drive the robot from the teleoperator at *fps*, optionally recording each frame.
 
@@ -316,6 +338,11 @@ def record_loop(
         with timer.section("observe"):
             # Get robot observation
             obs = robot.get_observation()
+            if sensors:
+                # last sample of each extra sensor, read right after the robot observation (shown by
+                # log_visualization_data, recorded below when the dataset has the sensors.* features)
+                sensors.poll()
+                sensors_frame = sensors.dataset_frame() if dataset is not None else {}
 
         with timer.section("process_obs"):
             # Applies a pipeline to the raw robot observation, default is IdentityProcessor
@@ -376,6 +403,8 @@ def record_loop(
             with timer.section("record"):
                 action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
                 frame = {**observation_frame, **action_frame, "task": single_task}
+                if sensors:
+                    frame.update({k: v for k, v in sensors_frame.items() if k in dataset.features})
                 dataset.add_frame(frame)
 
         if display_data:
@@ -401,13 +430,16 @@ def record(
 ) -> LeRobotDataset:
     init_logging()
     logging.info(pformat(asdict(cfg)))
+    # extra sensors (ToF, tactile): shown with display_data, recorded with record_extra_sensors
+    sensors = SensorHub(tof=make_tof_display_config(cfg), tactile=make_tactile_display_config(cfg))
+    sensors.start()
     if cfg.display_data:
         init_visualization(
             cfg.display_mode,
             session_name="recording",
             ip=cfg.display_ip,
             port=cfg.display_port,
-            tof=make_tof_display_config(cfg),
+            sensors=sensors,
         )
     display_compressed_images = (
         True
@@ -443,6 +475,9 @@ def record(
             use_videos=cfg.dataset.video,
         ),
     )
+    if sensors and cfg.record_extra_sensors:
+        dataset_features = {**dataset_features, **sensors.dataset_features()}
+        logging.info("Recording the extra sensors: %s", ", ".join(sensors.dataset_features()))
 
     dataset = None
     listener = None
@@ -530,6 +565,7 @@ def record(
                     display_mode=cfg.display_mode,
                     display_compressed_images=display_compressed_images,
                     timer=timer,
+                    sensors=sensors,
                 )
 
                 # Execute a few seconds without recording to give time to manually reset the environment
@@ -552,6 +588,7 @@ def record(
                         display_data=cfg.display_data,
                         display_mode=cfg.display_mode,
                         display_compressed_images=display_compressed_images,
+                        sensors=sensors,
                     )
 
                 if events["rerecord_episode"]:
@@ -592,6 +629,7 @@ def record(
 
         if cfg.display_data:
             shutdown_visualization(cfg.display_mode)
+        sensors.stop()
 
         if cfg.dataset.push_to_hub:
             if dataset and dataset.num_episodes > 0:
